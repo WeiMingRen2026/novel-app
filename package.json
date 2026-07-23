@@ -1,0 +1,22 @@
+{
+  "name": "novel-app-backend",
+  "version": "1.0.0",
+  "description": "小说阅读App后端服务",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "axios": "^1.6.2",
+    "cheerio": "^1.0.0-rc.12",
+    "node-cron": "^3.0.3",
+    "cors": "^2.8.5",
+    "morgan": "^1.10.0",
+    "iconv-lite": "^0.6.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
