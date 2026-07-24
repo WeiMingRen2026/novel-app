@@ -2,6 +2,7 @@ const fanqie = require('./fanqie');
 const qimao = require('./qimao');
 const qidian = require('./qidian');
 const biquge = require('./biquge');
+const { loadBookSources } = require('../services/bookSourceLoader');
 
 const sources = {
   fanqie,
@@ -17,13 +18,24 @@ const SOURCE_NAMES = {
   biquge: '笔趣阁',
 };
 
+function initDynamicSources() {
+  const dynamic = loadBookSources();
+  Object.entries(dynamic).forEach(([key, source]) => {
+    sources[key] = source;
+    SOURCE_NAMES[key] = source.sourceDisplayName || key;
+  });
+  console.log(`[书源] 动态书源已注册，当前共 ${Object.keys(sources).length} 个书源`);
+}
+
+initDynamicSources();
+
 function getSource(sourceName) {
   return sources[sourceName] || biquge;
 }
 
 async function searchAllSources(keyword, page = 1) {
   const results = [];
-  
+
   const searchPromises = Object.entries(sources).map(async ([sourceName, source]) => {
     try {
       const items = await source.search(keyword, page);
@@ -32,14 +44,13 @@ async function searchAllSources(keyword, page = 1) {
         sourceName: SOURCE_NAMES[sourceName] || sourceName,
       }));
     } catch (error) {
-      console.error(`${sourceName}搜索失败:`, error.message);
       return [];
     }
   });
-  
+
   const allResults = await Promise.all(searchPromises);
   allResults.forEach(items => results.push(...items));
-  
+
   return results;
 }
 
@@ -52,7 +63,6 @@ async function searchBySource(sourceName, keyword, page = 1) {
       sourceName: SOURCE_NAMES[sourceName] || sourceName,
     }));
   } catch (error) {
-    console.error(`${sourceName}搜索失败:`, error.message);
     return [];
   }
 }
@@ -86,7 +96,7 @@ async function getParagraphComments(sourceName, bookId, chapterId) {
 async function getCategories() {
   const categories = [];
   const categoryMap = new Map();
-  
+
   for (const [sourceName, source] of Object.entries(sources)) {
     try {
       const cats = await source.getCategories();
@@ -102,10 +112,10 @@ async function getCategories() {
         }
       });
     } catch (error) {
-      console.error(`${sourceName}获取分类失败:`, error.message);
+      // skip
     }
   }
-  
+
   return Array.from(categoryMap.values());
 }
 
@@ -114,7 +124,6 @@ async function getRankings(sourceName, rankType = 'hot', page = 1) {
   try {
     return await source.getRankings(rankType, page);
   } catch (error) {
-    console.error(`${sourceName}获取排行榜失败:`, error.message);
     return [];
   }
 }
