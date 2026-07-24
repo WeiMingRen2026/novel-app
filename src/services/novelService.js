@@ -41,7 +41,12 @@ async function upsertNovel(novelData) {
 }
 
 async function getNovel(novelId) {
-  return db.findOne('novels', { id: parseInt(novelId) });
+  const novel = db.findOne('novels', { id: parseInt(novelId) });
+  if (!novel) return null;
+  return {
+    ...novel,
+    book_id: novel.book_id,
+  };
 }
 
 async function getNovelByBookId(bookId, source) {
@@ -65,7 +70,12 @@ async function saveChapters(novelId, chapters) {
 }
 
 async function getChapters(novelId) {
-  return db.findAll('chapters', { novel_id: parseInt(novelId) }, { id: 'asc' });
+  const chapters = db.findAll('chapters', { novel_id: parseInt(novelId) }, { id: 'asc' });
+  return chapters.map(c => ({
+    ...c,
+    chapterId: c.chapter_id,
+    sourceUrl: c.source_url,
+  }));
 }
 
 async function getChapter(novelId, chapterId) {

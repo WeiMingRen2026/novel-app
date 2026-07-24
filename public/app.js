@@ -56,6 +56,7 @@ const state = {
   comicCurrentChapter: 0,
   categoryNovel: null,
   categoryComic: null,
+  selectedCategorySource: '',
 };
 
 const THEMES = [
@@ -200,9 +201,10 @@ async function loadNovelCategories() {
   try {
     const res = await API.novelCategories();
     if (res.code === 0) {
+      state.categories = res.data;
       const cats = res.data;
       const html = cats.map((c, i) => `
-        <div class="cat-item" onclick="openNovelCategory('${c.name}')">
+        <div class="cat-item" onclick="openNovelCategory('${c.name.replace(/'/g, "\\'")}')">
           <div class="cat-icon" style="background:${NOVEL_CAT_COLORS[i%NOVEL_CAT_COLORS.length]}">📖</div>
           <div class="cat-name">${c.name}</div>
         </div>
@@ -218,12 +220,22 @@ async function openNovelCategory(name) {
   showPage('page-novel-category');
   document.getElementById('novel-cat-title').textContent = name;
   document.getElementById('novel-cat-list').innerHTML = '<div class="loading"></div>';
+  
+  let source = state.selectedCategorySource;
+  if (!source) {
+    const cat = (state.categories || []).find(c => c.name === name);
+    if (cat && cat.source) source = cat.source;
+  }
+  
   try {
-    const res = await API.novelCategory(name);
+    const url = source 
+      ? `/api/novel/category/${encodeURIComponent(name)}?source=${source}` 
+      : `/api/novel/category/${encodeURIComponent(name)}`;
+    const res = await fetch(url).then(r => r.json());
     if (res.code === 0 && res.data.length > 0) {
       renderNovelList(res.data, 'novel-cat-list');
     } else {
-      document.getElementById('novel-cat-list').innerHTML = '<div class="empty">该分类暂无书籍，请换一个书源或分类试试</div>';
+      document.getElementById('novel-cat-list').innerHTML = '<div class="empty">该分类暂无书籍，请换一个分类试试</div>';
     }
   } catch(e) {
     document.getElementById('novel-cat-list').innerHTML = '<div class="empty">加载失败</div>';
@@ -314,7 +326,8 @@ async function doSearch(kw) {
   try {
     let res;
     if (searchMode === 'novel') {
-      const source = document.getElementById('search-source')?.dataset.source || 'all';
+      const activeTab = document.querySelector('#search-source-tabs .source-tab.active');
+      const source = activeTab ? activeTab.dataset.source : 'all';
       res = await API.novelSearch(kw.trim(), source);
     } else {
       res = await API.comicSearch(kw.trim());
@@ -479,8 +492,8 @@ async function startReading(chapterIndex) {
       document.getElementById('reader-content').style.color = state.theme.text;
       document.getElementById('reader-page').style.background = state.theme.bg;
 
-      loadParaComments(chapter.chapter_id);
-      API.progress(state.currentBook.id, chapter.chapter_id, chapter.title, 0);
+      loadParaComments(chapter.chapterId || chapter.chapter_id);
+      API.progress(state.currentBook.id, chapter.chapterId || chapter.chapter_id, chapter.title, 0);
     }
   } catch(e) {
     document.getElementById('reader-content').innerHTML = '<div class="empty">加载失败</div>';
@@ -585,7 +598,7 @@ async function startComicReading(chapterIndex) {
   document.getElementById('comic-reader-content').innerHTML = '<div class="loading"></div>';
 
   try {
-    const res = await API.comicContent(state.currentBook.id, chapter.chapter_id);
+    const res = await API.comicContent(state.currentBook.id, chapter.chapterId);
     if (res.code === 0) {
       const pages = res.data.pages || [];
       let html = `<div style="color:#888;text-align:center;padding:16px;background:#111;border-bottom:1px solid #222">${res.data.title||chapter.title}</div>`;

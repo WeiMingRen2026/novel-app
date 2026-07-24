@@ -35,21 +35,41 @@ function getSource(sourceName) {
 
 async function searchAllSources(keyword, page = 1) {
   const results = [];
+  const dynamicKeys = Object.keys(sources).filter(k => k.startsWith('bs_'));
+  const otherKeys = Object.keys(sources).filter(k => !k.startsWith('bs_'));
+  const orderedKeys = [...dynamicKeys, ...otherKeys];
 
-  const searchPromises = Object.entries(sources).map(async ([sourceName, source]) => {
+  for (const sourceName of orderedKeys) {
+    if (results.length >= 20) break;
     try {
+      const source = sources[sourceName];
       const items = await source.search(keyword, page);
-      return items.map(item => ({
-        ...item,
-        sourceName: SOURCE_NAMES[sourceName] || sourceName,
-      }));
+      if (items && items.length > 0) {
+        items.forEach(item => {
+          if (!results.find(r => r.bookId === item.bookId)) {
+            results.push({
+              ...item,
+              sourceName: SOURCE_NAMES[sourceName] || sourceName,
+            });
+          }
+        });
+      }
     } catch (error) {
-      return [];
+      // continue to next source
     }
-  });
+  }
 
-  const allResults = await Promise.all(searchPromises);
-  allResults.forEach(items => results.push(...items));
+  if (results.length === 0) {
+    try {
+      const biqugeItems = await biquge.search(keyword, page);
+      biqugeItems.forEach(item => {
+        results.push({
+          ...item,
+          sourceName: SOURCE_NAMES['biquge'],
+        });
+      });
+    } catch (e) {}
+  }
 
   return results;
 }
@@ -105,10 +125,9 @@ async function getCategories() {
         if (!categoryMap.has(key)) {
           categoryMap.set(key, {
             name: cat.name,
-            sources: [sourceName],
+            source: sourceName,
+            url: cat.url || '',
           });
-        } else {
-          categoryMap.get(key).sources.push(sourceName);
         }
       });
     } catch (error) {

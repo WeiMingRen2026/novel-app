@@ -1,9 +1,113 @@
 const fs = require('fs');
 const path = require('path');
 const cheerio = require('cheerio');
-const { fetchHTML, cleanText } = require('../utils/request');
+const axios = require('axios');
+const iconv = require('iconv-lite');
 
 const dataDir = path.join(__dirname, '../../data');
+
+const USER_AGENTS = [
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+  'Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Mobile Safari/537.36',
+  'Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Mobile Safari/537.36',
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1',
+  'Mozilla/5.0 (Linux; Android 10; MIX 2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Mobile Safari/537.36',
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+  'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+];
+
+function getRandomUA() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+function fetchURL(url, encoding = 'utf-8', retries = 3) {
+  const urlObj = new URL(url);
+  const baseDomain = urlObj.origin;
+  
+  const headers = {
+    'User-Agent': getRandomUA(),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1',
+    'Referer': baseDomain + '/',
+  };
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const response = axios.get(url, {
+        responseType: 'arraybuffer',
+        timeout: 20000,
+        headers: attempt === 0 ? headers : {
+          ...headers,
+          'User-Agent': getRandomUA(),
+          'Referer': baseDomain + '/',
+        },
+        maxRedirects: 5,
+        validateStatus: function (status) {
+          return status < 500;
+        },
+      });
+      
+      if (response.status === 403 || response.status === 401) {
+        if (attempt < retries - 1) continue;
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const buffer = Buffer.from(response.data);
+      
+      const contentType = response.headers['content-type'] || '';
+      let detectedEncoding = encoding;
+      
+      if (contentType.includes('charset=gbk') || contentType.includes('charset=gb2312')) {
+        detectedEncoding = 'gbk';
+      } else if (contentType.includes('charset=utf-8')) {
+        detectedEncoding = 'utf-8';
+      }
+      
+      if (detectedEncoding !== 'utf-8') {
+        try {
+          const decoded = iconv.decode(buffer, detectedEncoding);
+          return decoded.toString('utf-8');
+        } catch (e) {
+          return buffer.toString('utf-8');
+        }
+      }
+      
+      let text = buffer.toString('utf-8');
+      
+      if (text.includes('�') || text.includes('\uFFFD')) {
+        try {
+          text = iconv.decode(buffer, 'gbk').toString('utf-8');
+        } catch (e) {
+          try {
+            text = iconv.decode(buffer, 'gb2312').toString('utf-8');
+          } catch (e2) {}
+        }
+      }
+      
+      return text;
+    } catch (error) {
+      if (attempt === retries - 1) throw error;
+    }
+  }
+}
+
+function cleanText(text) {
+  if (!text) return '';
+  return text.replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*\n\s*\n/g, '\n\n')
+    .trim();
+}
 
 function parseSelector(rule) {
   if (!rule) return { type: 'css', selector: '' };
@@ -13,21 +117,17 @@ function parseSelector(rule) {
   if (rule === 'text') return { type: 'text' };
   if (rule === 'html') return { type: 'html' };
   
-  if (rule.startsWith('.')) return { type: 'css', selector: rule };
-  if (rule.startsWith('#')) return { type: 'css', selector: rule };
-  if (rule.includes('@')) {
-    const parts = rule.split('@');
-    const selector = parts[0];
-    const attr = parts[1];
-    return { type: 'attr', selector: selector, attr: attr };
-  }
   if (rule.startsWith('text##')) {
     const rest = rule.substring(5);
     const parts = rest.split('##');
     return { type: 'textRegex', prefix: parts[0] || '', regex: parts[1] || '', suffix: parts[2] || '' };
   }
-  if (rule.startsWith('class.')) {
-    return { type: 'css', selector: '.' + rule.substring(6) };
+  
+  if (rule.includes('@')) {
+    const parts = rule.split('@');
+    const selector = parts[0];
+    const attr = parts[1];
+    return { type: 'attr', selector: selector, attr: attr };
   }
   
   return { type: 'css', selector: rule };
@@ -45,17 +145,21 @@ function extractValue($, rule, context) {
       return $(context).html() || '';
     case 'attr': {
       let $els = $(context);
-      if (sel.selector) {
+      if (sel.selector && sel.selector !== 'text' && sel.selector !== 'html') {
         $els = $els.find(sel.selector);
+      }
+      if ($els.length === 0 && sel.selector) {
+        $els = $(sel.selector).first();
       }
       return $els.attr(sel.attr) || '';
     }
     case 'textRegex': {
-      let text = $(context).text().trim();
-      if (!text && sel.prefix) {
+      let text = '';
+      if (sel.prefix) {
         const $el = $(context).find(sel.prefix);
         if ($el.length) text = $el.text().trim();
       }
+      if (!text) text = $(context).text().trim();
       const regex = new RegExp(sel.regex || '');
       const match = text.match(regex);
       if (match) {
@@ -66,49 +170,17 @@ function extractValue($, rule, context) {
     case 'css':
     default: {
       if (!sel.selector) return '';
-      const $el = $(context).find(sel.selector);
+      let $el;
+      if (context && context.find) {
+        $el = $(context).find(sel.selector).first();
+        if ($el.length === 0) {
+          $el = $(sel.selector).first();
+        }
+      } else {
+        $el = $(sel.selector).first();
+      }
       if ($el.length === 0) return '';
-      return $el.first().text().trim() || $el.first().attr('href') || $el.first().attr('src') || '';
-    }
-  }
-}
-
-function extractList($, rule, context) {
-  if (!rule) return [];
-  
-  if (rule === 'text') {
-    const results = [];
-    $(context).each((i, el) => {
-      const val = $(el).text().trim();
-      if (val) results.push(val);
-    });
-    return results;
-  }
-  
-  const sel = parseSelector(rule);
-  
-  switch (sel.type) {
-    case 'text': {
-      const results = [];
-      $(context).each((i, el) => {
-        const val = $(el).text().trim();
-        if (val) results.push(val);
-      });
-      return results;
-    }
-    case 'attr': {
-      const results = [];
-      $(context).each((i, el) => {
-        const val = $(el).attr(sel.attr) || '';
-        if (val) results.push(val);
-      });
-      return results;
-    }
-    case 'css':
-    default: {
-      if (!sel.selector) return [];
-      const $els = $(context).find(sel.selector);
-      return $els.map((i, el) => $(el).text().trim() || $(el).attr('href') || '').get();
+      return $el.text().trim() || $el.attr('href') || $el.attr('src') || '';
     }
   }
 }
@@ -153,7 +225,7 @@ function loadBookSources() {
 
     sources.forEach((src, idx) => {
       if (!src.bookSourceName) return;
-      if (!src.enabled && src.enabled !== undefined) return;
+      if (src.enabled === false) return;
 
       const key = `bs_${idx}`;
       const name = src.bookSourceName || `书源${idx + 1}`;
@@ -161,7 +233,6 @@ function loadBookSources() {
 
       if (!baseUrl) return;
 
-      console.log(`[书源] 加载: ${name} (${baseUrl})`);
       dynamicSources[key] = createDynamicCrawler(key, name, baseUrl, src);
       loadedCount++;
     });
@@ -180,9 +251,8 @@ function resolveUrl(template, params, baseUrl) {
   Object.entries(params).forEach(([k, v]) => {
     url = url.replace(new RegExp(`\\{${k}\\}`, 'g'), encodeURIComponent(v));
   });
-  url = url.replace(/\{key\}/g, encodeURIComponent(params.key || ''));
   url = url.replace(/\{host\}/g, baseUrl);
-  url = url.replace(/\{page\}/g, params.page || '1');
+  url = url.replace(/\{page\}/g, String(params.page || 1));
   
   if (url.startsWith('http')) return url;
   if (url.startsWith('//')) return 'https:' + url;
@@ -198,10 +268,16 @@ function createDynamicCrawler(key, name, baseUrl, config) {
 
   async function search(keyword, page = 1) {
     try {
-      const searchUrl = resolveUrl(ruleSearch.searchUrl, { keyword, key: keyword, page }, baseUrl);
-      if (!searchUrl) return getFallbackResults(keyword, name, key);
+      let searchUrl = '';
+      if (ruleSearch.searchUrl) {
+        searchUrl = resolveUrl(ruleSearch.searchUrl, { keyword, key: keyword, page }, baseUrl);
+      } else if (config.searchUrl) {
+        searchUrl = resolveUrl(config.searchUrl, { keyword, key: keyword, page }, baseUrl);
+      }
+      
+      if (!searchUrl) return [];
 
-      const html = await fetchHTML(searchUrl, { encoding: 'utf-8' });
+      const html = await fetchURL(searchUrl);
       const $ = cheerio.load(html);
       const results = [];
 
@@ -218,9 +294,14 @@ function createDynamicCrawler(key, name, baseUrl, config) {
           const lastChapter = extractValue($, ruleSearch.lastChapter, $el) || '';
           const category = extractValue($, ruleSearch.kind, $el) || '';
 
-          if (title && title.length > 0) {
+          if (title && title.length > 0 && title !== '') {
+            let fullBookId = bookUrl;
+            if (bookUrl && !bookUrl.startsWith('http')) {
+              fullBookId = baseUrl.replace(/\/$/, '') + bookUrl;
+            }
+            
             results.push({
-              bookId: bookUrl || `${key}_${i}`,
+              bookId: fullBookId || `${key}_${Date.now()}_${i}`,
               source: key,
               title,
               author,
@@ -234,11 +315,9 @@ function createDynamicCrawler(key, name, baseUrl, config) {
         });
       }
 
-      if (results.length === 0) return getFallbackResults(keyword, name, key);
       return results;
     } catch (error) {
-      console.error(`${name}搜索失败:`, error.message);
-      return getFallbackResults(keyword, name, key);
+      return [];
     }
   }
 
@@ -258,88 +337,37 @@ function createDynamicCrawler(key, name, baseUrl, config) {
 
   async function getBookInfo(bookId) {
     try {
-      const tocUrl = extractTocUrl(bookId);
-      
-      let infoUrl = '';
-      if (ruleBookInfo.tocUrl) {
-        const tocSel = parseSelector(ruleBookInfo.tocUrl);
-        if (bookId && tocSel.type === 'attr') {
-          infoUrl = bookId;
-        } else {
-          infoUrl = resolveUrl(ruleBookInfo.tocUrl, { bookId }, baseUrl);
-        }
-      } else {
-        infoUrl = bookId.startsWith('http') ? bookId : (baseUrl.replace(/\/$/, '') + bookId);
+      let infoUrl = bookId;
+      if (!infoUrl.startsWith('http')) {
+        infoUrl = baseUrl.replace(/\/$/, '') + infoUrl;
       }
       
-      if (!infoUrl) return getFallbackBookInfo(bookId, name, key);
+      if (!infoUrl.startsWith('http')) {
+        return null;
+      }
 
-      const html = await fetchHTML(infoUrl, { encoding: 'utf-8' });
+      const html = await fetchURL(infoUrl);
       const $ = cheerio.load(html);
 
-      const title = extractValue($, ruleBookInfo.name, $('body')) || '';
-      const author = extractValue($, ruleBookInfo.author, $('body')) || '';
-      const cover = extractValue($, ruleBookInfo.coverUrl, $('body')) || '';
-      const intro = extractValue($, ruleBookInfo.intro, $('body')) || '';
-      const category = extractValue($, ruleBookInfo.kind, $('body')) || '';
-      const lastChapter = extractValue($, ruleBookInfo.lastChapter, $('body')) || '';
+      let title = extractValue($, ruleBookInfo.name, $('body')) || '';
+      if (!title) title = $('h1').first().text().trim() || '';
+      
+      let author = extractValue($, ruleBookInfo.author, $('body')) || '';
+      if (!author) author = $('.author, .book-author, span').first().text().replace(/作\s*者[：:]/, '').trim() || '';
+      
+      let cover = extractValue($, ruleBookInfo.coverUrl, $('body')) || '';
+      if (!cover) cover = $('.book-img img, .cover img, #fmimg img').attr('src') || '';
+      if (cover && !cover.startsWith('http')) cover = baseUrl.replace(/\/$/, '') + cover;
+      
+      let intro = extractValue($, ruleBookInfo.intro, $('body')) || '';
+      if (!intro) intro = cleanText($('#intro, .intro, .desc, .book-intro').text());
+      
+      let category = extractValue($, ruleBookInfo.kind, $('body')) || '';
+      if (!category) category = $('.crumb a, .con_top a').eq(1).text().trim() || '';
 
-      const chapters = [];
-      const chapterListSelector = ruleToc.chapterList || '';
-      const chapterNameSelector = ruleToc.chapterName || 'text';
-      const chapterUrlSelector = ruleToc.chapterUrl || 'href';
+      let lastChapter = extractValue($, ruleBookInfo.lastChapter, $('body')) || '';
 
-      if (chapterListSelector) {
-        const $chapterLinks = $(chapterListSelector);
-        
-        if (chapterUrlSelector === 'href') {
-          $chapterLinks.each((i, el) => {
-            const $el = $(el);
-            const chUrl = $el.attr('href') || '';
-            let chTitle = '';
-            
-            if (chapterNameSelector === 'text') {
-              chTitle = $el.text().trim();
-            } else {
-              chTitle = extractValue($, chapterNameSelector, $el) || $el.text().trim();
-            }
-            
-            if (chTitle && chTitle.length > 0) {
-              const fullUrl = chUrl.startsWith('http') ? chUrl : (chUrl ? baseUrl.replace(/\/$/, '') + chUrl : '');
-              chapters.push({
-                chapterId: fullUrl || `${bookId}_ch_${i}`,
-                title: chTitle,
-                sourceUrl: fullUrl,
-              });
-            }
-          });
-        } else {
-          $chapterLinks.each((i, el) => {
-            const $el = $(el);
-            const chUrl = extractValue($, chapterUrlSelector, $el) || '';
-            const chTitle = extractValue($, chapterNameSelector, $el) || $el.text().trim();
-            
-            if (chTitle && chTitle.length > 0) {
-              const fullUrl = chUrl.startsWith('http') ? chUrl : (chUrl ? baseUrl.replace(/\/$/, '') + chUrl : '');
-              chapters.push({
-                chapterId: fullUrl || `${bookId}_ch_${i}`,
-                title: chTitle,
-                sourceUrl: fullUrl,
-              });
-            }
-          });
-        }
-      }
-
-      if (chapters.length === 0) {
-        for (let i = 1; i <= 50; i++) {
-          chapters.push({
-            chapterId: `ch_${i}`,
-            title: `第${i}章`,
-            sourceUrl: '',
-          });
-        }
-      }
+      const chapters = parseChapters($, ruleToc, baseUrl, bookId);
 
       return {
         info: {
@@ -348,25 +376,66 @@ function createDynamicCrawler(key, name, baseUrl, config) {
           title: title || `书籍${bookId}`,
           author: author || '未知',
           cover: cover || '',
-          intro: intro || `来自${name}`,
+          intro: intro || '',
           category: category || '',
           status: '连载中',
-          lastChapter: lastChapter || chapters[chapters.length - 1]?.title || '',
+          lastChapter: lastChapter || (chapters.length > 0 ? chapters[chapters.length - 1].title : ''),
           totalChapters: chapters.length,
         },
         chapters,
       };
     } catch (error) {
-      console.error(`${name}获取详情失败:`, error.message);
-      return getFallbackBookInfo(bookId, name, key);
+      return null;
     }
   }
 
-  function extractTocUrl(bookId) {
-    if (!ruleBookInfo.tocUrl) return bookId;
-    const sel = parseSelector(ruleBookInfo.tocUrl);
-    if (sel.type === 'attr') return bookId;
-    return ruleBookInfo.tocUrl;
+  function parseChapters($, rule, baseUrl, bookId) {
+    const chapters = [];
+    const chapterListSelector = rule.chapterList || '';
+    const chapterNameSelector = rule.chapterName || 'text';
+    const chapterUrlSelector = rule.chapterUrl || '';
+
+    if (chapterListSelector) {
+      let $links;
+      if (chapterListSelector === 'a') {
+        $links = $('a');
+      } else {
+        $links = $(chapterListSelector);
+      }
+      
+      $links.each((i, el) => {
+        const $el = $(el);
+        
+        let chUrl = '';
+        let chTitle = '';
+        
+        if (chapterUrlSelector === 'href' || !chapterUrlSelector) {
+          chUrl = $el.attr('href') || '';
+        } else {
+          chUrl = extractValue($, chapterUrlSelector, $el) || $el.attr('href') || '';
+        }
+        
+        if (chapterNameSelector === 'text' || chapterNameSelector === 'a@text') {
+          chTitle = $el.text().trim();
+        } else {
+          chTitle = extractValue($, chapterNameSelector, $el) || $el.text().trim();
+        }
+
+        if (chTitle && chTitle.length > 1) {
+          const fullUrl = chUrl && !chUrl.startsWith('http') 
+            ? baseUrl.replace(/\/$/, '') + chUrl 
+            : chUrl;
+          
+          chapters.push({
+            chapterId: fullUrl || `${bookId}_ch_${i}`,
+            title: chTitle,
+            sourceUrl: fullUrl,
+          });
+        }
+      });
+    }
+
+    return chapters;
   }
 
   function getFallbackBookInfo(bookId, name, key) {
@@ -405,7 +474,7 @@ function createDynamicCrawler(key, name, baseUrl, config) {
         return { title: chapterId, content: '此章节暂不支持阅读，请换其他书源。', wordCount: 100 };
       }
 
-      const html = await fetchHTML(contentUrl, { encoding: 'utf-8' });
+      const html = await fetchURL(contentUrl);
       const $ = cheerio.load(html);
 
       const contentSelector = ruleContent.content || '#content';
@@ -414,12 +483,13 @@ function createDynamicCrawler(key, name, baseUrl, config) {
       let content = '';
       const sel = parseSelector(contentSelector);
       if (sel.type === 'css' && sel.selector) {
-        content = $(sel.selector).html() || '';
+        const $el = $(sel.selector).first();
+        content = $el.html() || '';
       } else if (sel.type === 'html') {
         content = $('body').html() || '';
       } else {
         const $el = $(contentSelector).first();
-        content = $el.html() || '';
+        content = $el.html() || $('body').html() || '';
       }
 
       content = content.replace(/<br\s*\/?>/gi, '\n');
@@ -447,7 +517,6 @@ function createDynamicCrawler(key, name, baseUrl, config) {
         wordCount: content.length,
       };
     } catch (error) {
-      console.error(`${name}获取章节失败:`, error.message);
       return { title: chapterId, content: '加载失败，请稍后重试。', wordCount: 0 };
     }
   }
@@ -457,31 +526,71 @@ function createDynamicCrawler(key, name, baseUrl, config) {
     if (exploreUrls.length > 0) {
       return exploreUrls.map(e => ({ name: e.name, source: key, url: e.url }));
     }
-    const cats = ['玄幻', '奇幻', '武侠', '仙侠', '都市', '历史', '军事', '游戏', '竞技', '科幻', '灵异', '女生', '言情', '悬疑', '轻小说'];
-    return cats.map(c => ({ name: c, source: key }));
+    const searchUrl = ruleSearch.searchUrl || config.searchUrl || '';
+    if (searchUrl) {
+      const cats = ['玄幻', '奇幻', '武侠', '仙侠', '都市', '历史', '军事', '游戏', '竞技', '科幻', '灵异', '女生', '言情', '悬疑', '轻小说'];
+      return cats.map(c => ({ name: c, source: key }));
+    }
+    return [];
   }
 
-  async function getRankings(rankType = 'hot', page = 1) {
-    const items = [];
-    for (let i = 1; i <= 20; i++) {
-      items.push({
-        rank: i,
-        bookId: `${key}_rank_${i}`,
-        source: key,
-        title: `热门小说${i}`,
-        author: '未知',
-      });
+  async getRankings(rankType = 'hot', page = 1) {
+    const exploreUrls = parseExploreUrls(ruleExplore.exploreUrl);
+    if (exploreUrls.length > 0) {
+      try {
+        const url = exploreUrls[0].url.replace('{page}', page);
+        const html = await fetchURL(url);
+        const $ = cheerio.load(html);
+        const results = [];
+        
+        const bookListSelector = ruleExplore.bookList || ruleSearch.bookList || '';
+        if (bookListSelector) {
+          $(bookListSelector).each((i, el) => {
+            const $el = $(el);
+            const title = extractValue($, ruleExplore.name || ruleSearch.name, $el) || '';
+            const author = extractValue($, ruleExplore.author || ruleSearch.author, $el) || '';
+            const bookUrl = extractValue($, ruleExplore.bookUrl || ruleSearch.bookUrl, $el) || '';
+            
+            if (title && title.length > 0) {
+              const fullBookId = bookUrl && !bookUrl.startsWith('http') 
+                ? baseUrl.replace(/\/$/, '') + bookUrl 
+                : bookUrl;
+              results.push({
+                rank: results.length + 1,
+                bookId: fullBookId || `${key}_rank_${i}`,
+                source: key,
+                title,
+                author,
+              });
+            }
+          });
+        }
+        if (results.length > 0) return results;
+      } catch (e) {}
     }
-    return items;
+    
+    return [];
   }
 
   async function getBooksByCategory(categoryName, page = 1) {
     try {
       const exploreUrls = parseExploreUrls(ruleExplore.exploreUrl);
-      const match = exploreUrls.find(e => e.name === categoryName);
+      if (exploreUrls.length === 0) return [];
+
+      let match = exploreUrls.find(e => e.name === categoryName);
+      
+      if (!match) {
+        match = exploreUrls.find(e => e.name.includes(categoryName) || categoryName.includes(e.name));
+      }
+      
+      if (!match && exploreUrls.length > 0) {
+        match = exploreUrls[0];
+      }
+      
       if (!match) return [];
 
-      const html = await fetchHTML(match.url.replace('{page}', page), { encoding: 'utf-8' });
+      const url = match.url.replace('{page}', page);
+      const html = await fetchURL(url);
       const $ = cheerio.load(html);
       const results = [];
 
@@ -496,8 +605,11 @@ function createDynamicCrawler(key, name, baseUrl, config) {
           const intro = extractValue($, ruleExplore.intro || ruleSearch.intro, $el) || '';
 
           if (title && title.length > 0) {
+            const fullBookId = bookUrl && !bookUrl.startsWith('http') 
+              ? baseUrl.replace(/\/$/, '') + bookUrl 
+              : bookUrl;
             results.push({
-              bookId: bookUrl || `${key}_cat_${i}`,
+              bookId: fullBookId || `${key}_cat_${i}`,
               source: key,
               title,
               author,
@@ -509,9 +621,37 @@ function createDynamicCrawler(key, name, baseUrl, config) {
         });
       }
 
+      if (results.length === 0 && exploreUrls.length > 0) {
+        const fallbackUrl = exploreUrls[0].url.replace('{page}', page);
+        const fallbackHtml = await fetchURL(fallbackUrl);
+        const $f = cheerio.load(fallbackHtml);
+        const fbListSelector = ruleExplore.bookList || ruleSearch.bookList || '';
+        if (fbListSelector) {
+          $f(fbListSelector).each((i, el) => {
+            const $el = $f(el);
+            const bookUrl = extractValue($f, ruleExplore.bookUrl || ruleSearch.bookUrl, $el) || '';
+            const title = extractValue($f, ruleExplore.name || ruleSearch.name, $el) || '';
+            const author = extractValue($f, ruleExplore.author || ruleSearch.author, $el) || '';
+            if (title && title.length > 0) {
+              const fullBookId = bookUrl && !bookUrl.startsWith('http') 
+                ? baseUrl.replace(/\/$/, '') + bookUrl 
+                : bookUrl;
+              results.push({
+                bookId: fullBookId || `${key}_cat_fb_${i}`,
+                source: key,
+                title,
+                author,
+                cover: '',
+                intro: '',
+                category: categoryName,
+              });
+            }
+          });
+        }
+      }
+
       return results;
     } catch (error) {
-      console.error(`${name}获取分类失败:`, error.message);
       return [];
     }
   }
@@ -528,4 +668,4 @@ function createDynamicCrawler(key, name, baseUrl, config) {
   };
 }
 
-module.exports = { loadBookSources };
+module.exports = { loadBookSources, fetchURL, cleanText };

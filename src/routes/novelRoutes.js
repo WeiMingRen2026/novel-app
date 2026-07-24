@@ -40,7 +40,7 @@ router.get('/categories', async (req, res) => {
       const key = c.name;
       if (!seen.has(key)) {
         seen.add(key);
-        uniqueCats.push({ name: c.name, sources: [...new Set(categories.filter(x => x.name === key).map(x => x.source))] });
+        uniqueCats.push({ name: c.name, source: c.source || '', url: c.url || '' });
       }
     });
     res.json({ code: 0, data: uniqueCats });
@@ -53,14 +53,24 @@ router.get('/categories', async (req, res) => {
 router.get('/category/:name', async (req, res) => {
   try {
     const { name } = req.params;
-    const { page = 1 } = req.query;
-    const source = crawlers.getFirstDynamicSource();
-    if (source) {
-      const results = await crawlers.getBooksByCategory(source, name, parseInt(page));
-      res.json({ code: 0, data: results });
-    } else {
-      res.json({ code: 0, data: [] });
+    const { page = 1, source } = req.query;
+    
+    let categorySource = source;
+    if (!categorySource) {
+      categorySource = crawlers.getFirstDynamicSource();
     }
+    
+    let results = await crawlers.getBooksByCategory(categorySource, name, parseInt(page));
+    
+    if (!results || results.length === 0) {
+      results = await crawlers.getBooksByCategory('biquge', name, parseInt(page));
+    }
+    
+    if (!results || results.length === 0) {
+      results = [];
+    }
+    
+    res.json({ code: 0, data: results });
   } catch (error) {
     console.error('获取分类书籍失败:', error);
     res.json({ code: 1, message: error.message });
@@ -69,8 +79,23 @@ router.get('/category/:name', async (req, res) => {
 
 router.get('/rankings', async (req, res) => {
   try {
-    const { source = 'fanqie', type = 'hot', page = 1 } = req.query;
-    const rankings = await crawlers.getRankings(source, type, parseInt(page));
+    const { source, type = 'hot', page = 1 } = req.query;
+    
+    let rankingSource = source;
+    if (!rankingSource || rankingSource === 'fanqie') {
+      rankingSource = crawlers.getFirstDynamicSource();
+    }
+    
+    let rankings = await crawlers.getRankings(rankingSource, type, parseInt(page));
+    
+    if (!rankings || rankings.length === 0) {
+      rankings = await crawlers.getRankings('biquge', type, parseInt(page));
+    }
+    
+    if (!rankings || rankings.length === 0) {
+      rankings = [];
+    }
+    
     res.json({ code: 0, data: rankings });
   } catch (error) {
     console.error('获取排行榜失败:', error);
@@ -82,7 +107,29 @@ router.get('/book/:source/:bookId', async (req, res) => {
   try {
     const { source, bookId } = req.params;
     
-    const { info, chapters } = await crawlers.getBookInfo(source, bookId);
+    const result = await crawlers.getBookInfo(source, bookId);
+    
+    if (!result || !result.info) {
+      const biqugeResult = await crawlers.getBookInfo('biquge', bookId);
+      if (biqugeResult && biqugeResult.info) {
+        const novelId = await novelService.upsertNovel(biqugeResult.info);
+        await novelService.saveChapters(novelId, biqugeResult.chapters);
+        const inShelf = await novelService.isInBookshelf(novelId);
+        return res.json({ 
+          code: 0, 
+          data: {
+            id: novelId,
+            ...biqugeResult.info,
+            inShelf,
+            chapters: biqugeResult.chapters.slice(0, 100),
+            totalChapters: biqugeResult.chapters.length,
+          }
+        });
+      }
+      return res.json({ code: 1, message: '无法获取书籍信息，请尝试其他书源' });
+    }
+    
+    const { info, chapters } = result;
     
     const novelId = await novelService.upsertNovel(info);
     await novelService.saveChapters(novelId, chapters);
