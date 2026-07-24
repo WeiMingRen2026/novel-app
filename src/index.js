@@ -6,6 +6,7 @@ const fs = require('fs');
 
 const novelRoutes = require('./routes/novelRoutes');
 const shelfRoutes = require('./routes/shelfRoutes');
+const comicRoutes = require('./routes/comicRoutes');
 const { initCronJobs } = require('./services/cronService');
 
 const dataDir = path.join(__dirname, '../data');
@@ -35,6 +36,7 @@ app.get('/api/health', (req, res) => {
 
 app.use('/api/novel', novelRoutes);
 app.use('/api/shelf', shelfRoutes);
+app.use('/api/comic', comicRoutes);
 
 // 提供网页版静态文件
 app.use(express.static(path.join(__dirname, '../public')));
