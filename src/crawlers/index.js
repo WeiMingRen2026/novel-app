@@ -128,6 +128,24 @@ async function getRankings(sourceName, rankType = 'hot', page = 1) {
   }
 }
 
+function getFirstDynamicSource() {
+  const dynamicKeys = Object.keys(sources).filter(k => k.startsWith('bs_'));
+  if (dynamicKeys.length > 0) return dynamicKeys[0];
+  return 'biquge';
+}
+
+async function getBooksByCategory(sourceName, categoryName, page = 1) {
+  const source = getSource(sourceName);
+  if (source.getBooksByCategory) {
+    try {
+      return await source.getBooksByCategory(categoryName, page);
+    } catch (error) {
+      return [];
+    }
+  }
+  return [];
+}
+
 function getAllSources() {
   return Object.entries(sources).map(([key, value]) => ({
     key,
@@ -146,6 +164,8 @@ module.exports = {
   getParagraphComments,
   getCategories,
   getRankings,
+  getBooksByCategory,
+  getFirstDynamicSource,
   getAllSources,
   getSource,
   SOURCE_NAMES,

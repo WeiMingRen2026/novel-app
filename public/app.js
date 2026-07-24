@@ -9,13 +9,15 @@ const API = {
   // 小说
   novelSearch: (keyword, source='all') => API.get(`/api/novel/search?keyword=${encodeURIComponent(keyword)}&source=${source}`),
   novelCategories: () => API.get('/api/novel/categories'),
-  novelRankings: (source='fanqie', type='hot') => API.get(`/api/novel/rankings?source=${source}&type=${type}`),
-  novelBookInfo: (source, bookId) => API.get(`/api/novel/book/${source}/${bookId}`),
+  novelRankings: (source='bs_0', type='hot') => API.get(`/api/novel/rankings?source=${source}&type=${type}`),
+  novelBookInfo: (source, bookId) => API.get(`/api/novel/book/${source}/${encodeURIComponent(bookId)}`),
   novelChapters: (novelId) => API.get(`/api/novel/chapters/${novelId}`),
-  novelContent: (novelId, chapterId) => API.get(`/api/novel/content/${novelId}/${chapterId}`),
+  novelContent: (novelId, chapterId) => API.get(`/api/novel/content/${novelId}/${encodeURIComponent(chapterId)}`),
   novelReviews: (novelId, page=1, refresh=false) => API.get(`/api/novel/reviews/${novelId}?page=${page}&refresh=${refresh}`),
   novelRefreshReviews: (novelId) => API.post(`/api/novel/reviews/${novelId}/refresh`),
-  novelParaComments: (novelId, chapterId, refresh=false) => API.get(`/api/novel/paragraph-comments/${novelId}/${chapterId}?refresh=${refresh}`),
+  novelParaComments: (novelId, chapterId, refresh=false) => API.get(`/api/novel/paragraph-comments/${novelId}/${encodeURIComponent(chapterId)}?refresh=${refresh}`),
+  novelCategory: (name, page=1) => API.get(`/api/novel/category/${encodeURIComponent(name)}?page=${page}`),
+  novelSources: () => API.get('/api/novel/sources'),
 
   // 漫画
   comicCategories: () => API.get('/api/comic/categories'),
@@ -125,11 +127,11 @@ function switchTab(tab) {
 // ============================================
 async function loadHome() {
   try {
-    const res = await API.novelRankings('biquge', 'hot');
+    const res = await API.novelRankings('bs_0', 'hot');
     if (res.code === 0) {
       const books = res.data.slice(0, 6);
       const html = books.map((b, i) => `
-        <div class="book-card" onclick="openNovelBook('${b.source||'biquge'}','${b.bookId}')">
+        <div class="book-card" onclick="openNovelBook('${b.source||'bs_0'}','${b.bookId}')">
           <div class="book-cover">📖</div>
           <div class="book-title">${b.title}</div>
           <div class="book-author">${b.author||'未知'}</div>
@@ -217,11 +219,11 @@ async function openNovelCategory(name) {
   document.getElementById('novel-cat-title').textContent = name;
   document.getElementById('novel-cat-list').innerHTML = '<div class="loading"></div>';
   try {
-    const res = await API.novelSearch(name, 'biquge');
-    if (res.code === 0) {
+    const res = await API.novelCategory(name);
+    if (res.code === 0 && res.data.length > 0) {
       renderNovelList(res.data, 'novel-cat-list');
     } else {
-      document.getElementById('novel-cat-list').innerHTML = '<div class="empty">暂无数据</div>';
+      document.getElementById('novel-cat-list').innerHTML = '<div class="empty">该分类暂无书籍，请换一个书源或分类试试</div>';
     }
   } catch(e) {
     document.getElementById('novel-cat-list').innerHTML = '<div class="empty">加载失败</div>';
@@ -458,7 +460,7 @@ async function startReading(chapterIndex) {
   document.getElementById('reader-content').innerHTML = '<div class="loading"></div>';
 
   try {
-    const res = await API.novelContent(state.currentBook.id, chapter.chapter_id);
+    const res = await API.novelContent(state.currentBook.id, chapter.chapterId);
     if (res.code === 0) {
       const paragraphs = (res.data.content||'').split(/\n\s*\n/).filter(p=>p.trim());
       let html = `<div class="reader-title">${res.data.title||chapter.title}</div>`;
@@ -696,14 +698,14 @@ async function loadShelf() {
 // ============================================
 //  排行榜
 // ============================================
-let rankSource = 'biquge', rankType = 'hot';
+let rankSource = 'bs_0', rankType = 'hot';
 
-async function loadRankings(source='biquge', type='hot') {
+async function loadRankings(source='bs_0', type='hot') {
   try {
     const res = await API.novelRankings(source, type);
     if (res.code === 0) {
       const html = res.data.map((b, i) => `
-        <div class="rank-item" onclick="openNovelBook('${b.source||source}','${b.bookId}')">
+        <div class="rank-item" onclick="openNovelBook('${b.source||source}','${encodeURIComponent(b.bookId)}')">
           <div class="rank-num ${i<3?'top':''}">${i+1}</div>
           <div class="rank-info">
             <div class="rank-title">${b.title}</div>
@@ -713,6 +715,30 @@ async function loadRankings(source='biquge', type='hot') {
         </div>
       `).join('');
       document.getElementById('rank-list').innerHTML = html;
+    }
+  } catch(e) { console.error(e); }
+}
+
+async function loadSourceTabs() {
+  try {
+    const res = await API.novelSources();
+    if (res.code === 0) {
+      const tabs = document.getElementById('rank-source-tabs');
+      const searchTabs = document.getElementById('search-source-tabs');
+      const dynamicSources = res.data.filter(s => s.key.startsWith('bs_'));
+      
+      if (dynamicSources.length > 0) {
+        const topSources = dynamicSources.slice(0, 4);
+        const tabsHtml = topSources.map((s, i) => 
+          `<div class="source-tab ${i===0?'active':''}" onclick="switchRankSource('${s.key}',this)">${s.name.slice(0,6)}</div>`
+        ).join('');
+        tabs.innerHTML = tabsHtml;
+        rankSource = topSources[0].key;
+
+        const searchHtml = `<div class="source-tab active" onclick="switchSearchSource('all',this)" data-source="all">全部</div>` +
+          topSources.map(s => `<div class="source-tab" onclick="switchSearchSource('${s.key}',this)" data-source="${s.key}">${s.name.slice(0,6)}</div>`).join('');
+        searchTabs.innerHTML = searchHtml;
+      }
     }
   } catch(e) { console.error(e); }
 }
@@ -984,6 +1010,7 @@ function initApp() {
   `;
 
   // 加载初始数据
+  loadSourceTabs();
   loadHome();
   loadHomeCategories();
   loadNovelCategories();

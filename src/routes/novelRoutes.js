@@ -34,9 +34,35 @@ router.get('/search', async (req, res) => {
 router.get('/categories', async (req, res) => {
   try {
     const categories = await crawlers.getCategories();
-    res.json({ code: 0, data: categories });
+    const uniqueCats = [];
+    const seen = new Set();
+    categories.forEach(c => {
+      const key = c.name;
+      if (!seen.has(key)) {
+        seen.add(key);
+        uniqueCats.push({ name: c.name, sources: [...new Set(categories.filter(x => x.name === key).map(x => x.source))] });
+      }
+    });
+    res.json({ code: 0, data: uniqueCats });
   } catch (error) {
     console.error('获取分类失败:', error);
+    res.json({ code: 1, message: error.message });
+  }
+});
+
+router.get('/category/:name', async (req, res) => {
+  try {
+    const { name } = req.params;
+    const { page = 1 } = req.query;
+    const source = crawlers.getFirstDynamicSource();
+    if (source) {
+      const results = await crawlers.getBooksByCategory(source, name, parseInt(page));
+      res.json({ code: 0, data: results });
+    } else {
+      res.json({ code: 0, data: [] });
+    }
+  } catch (error) {
+    console.error('获取分类书籍失败:', error);
     res.json({ code: 1, message: error.message });
   }
 });
@@ -92,7 +118,8 @@ router.get('/chapters/:novelId', async (req, res) => {
 
 router.get('/content/:novelId/:chapterId', async (req, res) => {
   try {
-    const { novelId, chapterId } = req.params;
+    const { novelId } = req.params;
+    const chapterId = decodeURIComponent(req.params.chapterId);
     
     const novel = await novelService.getNovel(parseInt(novelId));
     if (!novel) {
